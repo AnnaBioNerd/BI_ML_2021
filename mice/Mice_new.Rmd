@@ -1,0 +1,392 @@
+---
+title: "Mice"
+author: "Anna Shiriaeva"
+date: "10 04 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library("readxl")
+setwd("C:/Users/annab/OneDrive/Documents/ИБ/ML/mice")
+data<- read_excel("Data_Cortex_Nuclear.xls")
+```
+
+# 1.EDA
+## 1.1 сколько всего мышей было в эксперименте?
+
+```{r}
+str(data)
+head(data)
+#Первая колонка  - это ID мыши и через нижнее подчёркивание номер измерения
+#Давайте раазделим ID и измерение на 2 колонки:
+data$ID = sapply(strsplit(data$MouseID, "_", fixed=T), function(x) (x[1]))
+data$measurement = sapply(strsplit(data$MouseID, "_", fixed=T), function(x) (x[2]))
+print(paste("There are ", as.character(length(unique(data$ID))), " mice in the data", sep=""))
+
+
+```
+
+
+
+## 1.2 какие группы вы можете можете выделить?
+
+### Группы хранятся в Classes
+
+### Classes:
+#### c-CS-s: control mice, stimulated to learn, injected with saline (9 mice)
+#### c-CS-m: control mice, stimulated to learn, injected with memantine (10 mice)
+#### c-SC-s: control mice, not stimulated to learn, injected with saline (9 mice)
+#### c-SC-m: control mice, not stimulated to learn, injected with memantine (10 mice)
+
+#### t-CS-s: trisomy mice, stimulated to learn, injected with saline (7 mice)
+#### t-CS-m: trisomy mice, stimulated to learn, injected with memantine (9 mice)
+#### t-SC-s: trisomy mice, not stimulated to learn, injected with saline (9 mice)
+#### t-SC-m: trisomy mice, not stimulated to learn, injected with memantine (9 mice)
+
+
+
+## 1.3 насколько эти группы сбалансированы?
+
+
+```{r}
+library(ggplot2)
+
+mice = unique(data.frame(data$ID, data$class, data$Genotype, data$Treatment, data$Behavior))
+colnames(mice)=c("ID", "class", "Genotype", "Treatment", "Behaviour")
+head(mice)
+
+ggplot(mice, aes(x=Genotype)) + 
+  geom_histogram(stat="count")+
+  facet_grid(Treatment+Behaviour ~ .)
+
+table(mice$Genotype, mice$Treatment, mice$Behaviour)
+```
+
+#### Вывод - группы достаточно сбалансированы
+
+
+
+## 1.4 какое количество полных наблюдений (речь про NA)?
+```{r}
+no_na_data = na.omit(data) 
+nrow(no_na_data)
+```
+#### 552 полных наблюдения
+
+
+
+
+
+# 2. Есть ли различия в уровне продукции BDNF_N в зависимости от класса в эксперименте (10 баллов) 
+
+```{r}
+library("ggpubr")
+library(rstatix)
+
+
+BDNF<-data.frame(data$ID, data$measurement, data$class, data$BDNF_N)
+no_na_BDNF = na.omit(BDNF) 
+colnames(no_na_BDNF)=c("ID", "measurements", "class", "BDNF_N")
+#let's find average for each mice
+average_per_mice<- aggregate(no_na_BDNF$BDNF_N, list(no_na_BDNF$ID,no_na_BDNF$class ), FUN="mean")
+colnames(average_per_mice) = c("ID", "class", "mean")
+
+#Let's check data for normality in each class:
+class = c()
+p_normality = c()
+
+for (i in unique(average_per_mice$class)){
+  values = average_per_mice$mean[average_per_mice$class==i]
+  test = shapiro.test(values)
+  print(test)
+  class<-append(class, i)
+  p_normality = append(p_normality, test$p.value)
+}
+
+summary <- data.frame(class, p_normality)
+summary$p_adj <- p.adjust(summary$p, method = "bonferroni", n = nrow(summary))
+
+#if the data are normally distributed we can check for homogeneity of variances
+
+if (sum(summary$p_adj>=0.05)==nrow(summary)){
+res <- bartlett.test(mean ~ class, data = average_per_mice)
+print(res)
+}
+
+
+# if there are no differences in variances we can proceed to ANOVA
+
+if (res$p.value>=0.05){
+res.aov <- aov(mean ~ factor(class), data = average_per_mice)
+print(summary(res.aov))
+
+if (summary(res.aov)[[1]][["Pr(>F)"]][1]<0.05){
+  print("There are statisticaly significant differences found by ANOVA")
+}else{
+  print("There are no statisticaly significant differences found by ANOVA")
+}
+
+
+Tu=TukeyHSD(res.aov)
+print(Tu)
+Tu_df<-do.call(data.frame, Tu)
+
+
+stat.test <- res.aov %>%
+  tukey_hsd()
+p <- ggboxplot(average_per_mice, x = "class", y = "mean",
+               add = "jitter", palette = "jco")
+
+label_height_annova = 4*max(average_per_mice$mean)
+label_height=1.1*max(average_per_mice$mean)
+
+print(p+
+stat_compare_means(method = "anova", label.y = label_height_annova)+  stat_pvalue_manual(stat.test, label = "p.adj",  y.position = seq(label_height, (label_height+(nrow(Tu$`factor(class)`)-1)*label_height*0.1), 0.1*label_height), label.size = 3))
+
+
+if (sum(Tu_df$factor.class..p.adj>=0.05)<nrow(Tu_df)){
+  diff_pair<-Tu_df[Tu_df$factor.class..p.adj<0.05,]
+  print("There are significant differences found in Tukey post-hoc test between the following classes:")
+  print(rownames(diff_pair))
+}else {
+    print("There are no statistically significant differences found in Tukey post-hoc test")
+  }
+
+}
+
+
+
+#if the data are not normally distributed or there in no homogeneity of variances, let's proceed with a nonparametric test:
+if ((sum(summary$p_adj>=0.05)<nrow(summary))|(res$p.value<0.05)){
+  
+  res.kr<-kruskal.test(mean ~ class, data = average_per_mice)
+  print(res.kr)
+  if (res.kr$p.value<0.05){
+    print("At least one group is statistically different from the other groups")
+  } else {
+    print("There are no statistically significant differences")
+  }
+}
+
+
+
+
+```
+
+
+
+
+
+
+
+# 3. Попробовать построить линейную модель, способную предсказать уровень продукции белка ERBB4_N на основании данных о других белках в эксперименте
+
+```{r}
+rm(list=setdiff(ls(),c("no_na_data", "data")))
+#let's calculate mean of 15 measurements for each mouse
+drop <- c("measurement","MouseID" )
+no_na_dropped_col = no_na_data[,!(names(no_na_data) %in% drop)]
+aggregated_data<-aggregate(.~ID+class+Genotype+Treatment+Behavior, no_na_dropped_col, mean)
+
+
+drop <- c("ID", "class", "Genotype", "Treatment", "Behavior" )
+no_characters<-aggregated_data[,!names(aggregated_data)%in%drop]
+
+
+#Let's build a linear regression model
+#1. Let's remove those predictors that do not correlate with ERBB4_N at all or correlate too weakly (<0.2)
+library(Hmisc)
+data_matr <- as.matrix(no_characters)
+all_corr<-rcorr(data_matr, type="pearson")
+p<-data.frame(all_corr$P)
+r<-data.frame(all_corr$r)
+
+ERBB4_N_p<-p[,colnames(p)=="ERBB4_N"]
+ERBB4_N_r<-r[,colnames(r)=="ERBB4_N"]
+genes_to_remove<-rownames(p)[which((ERBB4_N_p>0.05)|(ERBB4_N_r<0.2))]
+no_characters<-no_characters[,!colnames(no_characters)%in%genes_to_remove]
+
+##Давайте попробуем использовать все оставшиеся предикторы и построим модель
+# Fit the full model 
+full.model <- lm(ERBB4_N ~ ., data = no_characters)
+summary(full.model)
+
+
+```
+
+### Итог: модель не получилась, все p-value больше 0.05
+
+### Возможно у нас есть сильно скореллированные предикторы. Давайте попробуем от таких избавиться
+```{r}
+
+
+#Давайте проверим на мультиколлинеарность
+data_matr <- as.matrix(no_characters[,colnames(no_characters)!="ERBB4_N"])
+all_corr<-rcorr(data_matr, type="pearson")
+
+#Посмотрим, какие коэффициенты корреляции статистически значимо больше 0.5
+p<-data.frame(all_corr$P)
+r<-data.frame(all_corr$r)
+
+threshold = 0.5
+gene = c()
+correlates_with<-c()
+
+for (col in c(1:ncol(p))){
+  column_name = colnames(p)[col]
+  condition1<-!is.na(p[,col])
+  condition2<-p[,col]<0.05
+  condition3<-abs(r[,col])>threshold
+  indicies = which(condition1 & condition2 & condition3)
+  gene = append(gene, column_name)
+  correlates_with = append(correlates_with, length(indicies))
+  
+}
+
+
+#Let's remove one gene that correlates with the highest number of genes and repeat until we have no genes that correlate with others
+
+max = max(correlates_with)
+
+while(sum(correlates_with)>0){
+drop = gene[correlates_with==max]
+set.seed(1236)
+drop = sample(drop, 1)
+p = p[!(rownames(p) %in% drop),!(names(p) %in% drop)]
+r = r[!(rownames(r) %in% drop),!(names(r) %in% drop)]
+
+gene = c()
+correlates_with<-c()
+
+for (col in c(1:ncol(p))){
+  column_name = colnames(p)[col]
+  condition1<-!is.na(p[,col])
+  condition2<-p[,col]<0.05
+  condition3<-r[,col]>0.7
+  indicies = which(condition1 & condition2 & condition3)
+  gene = append(gene, column_name)
+  correlates_with = append(correlates_with, length(indicies))
+  
+}
+
+max = max(correlates_with)
+}
+
+
+#We now have genes that are not highly correlated with other genes
+#These genes are:
+gene
+
+
+#Let's use these genes as predictors
+no_characters_short<-no_characters[, colnames(no_characters)%in%c(gene,"ERBB4_N" )]
+
+model <- lm(ERBB4_N ~ ., data = no_characters_short)
+model
+summary(model)
+
+
+```
+`
+
+
+### Давайте ещё попробуем сделать пошаговую регрессию
+```{r}
+library(MASS)
+# Fit the full model 
+full.model <- lm(ERBB4_N ~ ., data = no_characters_short)
+# Stepwise regression model
+step.model <- stepAIC(full.model, direction = "both", 
+                      trace = FALSE)
+summary(step.model)
+```
+
+
+### Возможно стоило использовать такой подход изначально...
+### Попробуем реализовать пошаговую регрессию на данных, в котороых мы ещё не удалили скореллированные предикторы
+
+```{r}
+# Fit the full model 
+full.model <- lm(ERBB4_N ~ ., data = no_characters)
+# Stepwise regression model
+step.model <- stepAIC(full.model, direction = "both", 
+                      trace = FALSE)
+summary(step.model)
+```
+
+### Получили модель, объясняющую практически всю дисперсию ERBB4_N
+
+
+
+
+
+
+
+
+
+
+
+
+# 4. Сделайте PCA 
+
+```{r}
+rm(list=setdiff(ls(),c("no_na_data", "data")))
+drop <- c("measurement","MouseID" , "ID","Genotype", "Treatment", "Behavior", "class")
+no_na_dropped_col = no_na_data[,!(names(no_na_data) %in% drop)]
+head(no_na_dropped_col)
+```
+## 4.1 -- сделайте ординацию 
+```{r}
+
+library(FactoMineR)
+data_pca <- PCA(no_na_dropped_col, graph=FALSE)
+
+```
+
+
+## 4.2 -- постройте графики факторных нагрузок 
+```{r}
+#Factor loadings:
+data_pca$var$cor
+
+library(factoextra)
+fviz_pca_var(data_pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             )
+
+fviz_pca_biplot(data_pca, repel = TRUE,
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+                )
+
+
+```
+
+
+
+## 4.3 -- определите, какой процент объясняет каждая компонента 
+```{r}
+get_eigenvalue(data_pca)
+fviz_eig(data_pca)
+
+```
+
+## 4.4 -- постройте трехмерный график для первых 3-х компонент 
+```{r}
+library(plotly)
+prin_comp <- prcomp(no_na_dropped_col, rank. = 3)
+components <- prin_comp[["x"]]
+components <- data.frame(components)
+components$PC2 <- -components$PC2
+components$PC3 <- -components$PC3
+
+plot_ly(components, x = ~PC1, y = ~PC2, z = ~PC3 ) %>%
+  add_markers(size = 12)
+```
+
